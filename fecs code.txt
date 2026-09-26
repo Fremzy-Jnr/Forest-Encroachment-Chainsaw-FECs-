@@ -1,0 +1,309 @@
+#include <WiFi.h>
+#include <WebServer.h>
+
+// --- Configuration ---
+
+// Wi-Fi credentials for the ESP32 Access Point
+const char* ssid = "FECS_Chainsaw_01";
+const char* password = "fecsforachange123";
+
+// GPIO pin connected to the relay module
+const int RELAY_PIN = 26;
+
+// Mock database credentials for prototype testing
+const String validEPA = "EPA123";
+const String validID = "CS001";
+const String validCode = "7788";
+
+// Create a web server listening on port 80
+WebServer server(80);
+
+
+// --- Login Page HTML & CSS ---
+
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FECS IDENTIFICATION</title>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f7f9;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+        }
+
+        h2 {
+            color: #007bff;
+            font-size: 24px;
+            letter-spacing: 0.5px;
+            margin-bottom: 20px;
+        }
+
+        .card {
+            background-color: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+            width: 300px;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            font-size: 12px;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 5px;
+        }
+
+        input[type="text"],
+        input[type="password"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+            font-size: 14px;
+        }
+
+        button {
+            width: 100%;
+            padding: 12px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: bold;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+
+        button:hover {
+            background-color: #0056b3;
+        }
+
+        .footer {
+            margin-top: 30px;
+            font-size: 10px;
+            color: #aaa;
+        }
+
+        .error {
+            color: red;
+            font-size: 12px;
+            text-align: center;
+            margin-bottom: 10px;
+            display: none;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h2>FECS IDENTIFICATION GHANA</h2>
+
+    <div class="card">
+
+        <div class="error" id="errorMsg">
+            Invalid Credentials. Try Again.
+        </div>
+
+        <form action="/login" method="POST">
+
+            <div class="form-group">
+                <label>EPA Number:</label>
+                <input
+                    type="text"
+                    name="epa"
+                    placeholder="Enter EPA Number"
+                    required
+                >
+            </div>
+
+            <div class="form-group">
+                <label>Chainsaw ID:</label>
+                <input
+                    type="text"
+                    name="id"
+                    placeholder="Enter Chainsaw ID"
+                    required
+                >
+            </div>
+
+            <div class="form-group">
+                <label>Security Code:</label>
+                <input
+                    type="password"
+                    name="code"
+                    placeholder="Enter Security Code"
+                    required
+                >
+            </div>
+
+            <button type="submit">Submit</button>
+
+        </form>
+    </div>
+
+    <div class="footer">
+        &copy; 2024 FECS IDENTIFICATION GHANA
+    </div>
+
+    <script>
+        // Show error message if login failed
+        const urlParams = new URLSearchParams(window.location.search);
+
+        if (urlParams.has("error")) {
+            document.getElementById("errorMsg").style.display = "block";
+        }
+    </script>
+
+</body>
+</html>
+)rawliteral";
+
+
+// --- Success Page HTML ---
+
+const char success_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <style>
+        body {
+            font-family: Arial;
+            text-align: center;
+            padding-top: 50px;
+            background-color: #e8f5e9;
+        }
+
+        h1 {
+            color: #2e7d32;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h1>Authentication Successful!</h1>
+
+    <p>GPS Tracker Activated.</p>
+
+    <p>
+        Motor Unlocked. You may now operate the chainsaw.
+    </p>
+
+</body>
+</html>
+)rawliteral";
+
+
+// --- Server Handlers ---
+
+void handleRoot() {
+    server.send(200, "text/html", index_html);
+}
+
+
+void handleLogin() {
+
+    // Check if all form data was sent
+    if (
+        server.hasArg("epa") &&
+        server.hasArg("id") &&
+        server.hasArg("code")
+    ) {
+
+        String inputEPA = server.arg("epa");
+        String inputID = server.arg("id");
+        String inputCode = server.arg("code");
+
+        // Verify credentials
+        if (
+            inputEPA == validEPA &&
+            inputID == validID &&
+            inputCode == validCode
+        ) {
+
+            Serial.println("Login Successful! Turning on motor and GPS...");
+
+            // Trigger the relay / motor driver
+            digitalWrite(RELAY_PIN, HIGH);
+
+            // Send success page
+            server.send(200, "text/html", success_html);
+
+        } else {
+
+            Serial.println("Login Failed.");
+
+            // Redirect back to login page with an error flag
+            server.sendHeader("Location", "/?error=1");
+            server.send(303);
+        }
+
+    } else {
+
+        server.send(400, "text/plain", "Bad Request");
+    }
+}
+
+
+// --- Setup ---
+
+void setup() {
+
+    Serial.begin(115200);
+
+    // Configure relay pin
+    pinMode(RELAY_PIN, OUTPUT);
+
+    // Ensure motor is OFF by default
+    digitalWrite(RELAY_PIN, LOW);
+
+    // Set up ESP32 as an Access Point
+    Serial.println("Setting up Access Point...");
+
+    WiFi.softAP(ssid, password);
+
+    // Get Access Point IP address
+    IPAddress IP = WiFi.softAPIP();
+
+    Serial.print("AP IP address: ");
+    Serial.println(IP);
+
+    // Define server routes
+    server.on("/", HTTP_GET, handleRoot);
+    server.on("/login", HTTP_POST, handleLogin);
+
+    // Start web server
+    server.begin();
+
+    Serial.println("Web server started.");
+}
+
+
+// --- Main Loop ---
+
+void loop() {
+
+    // Listen for incoming clients
+    server.handleClient();
+}
