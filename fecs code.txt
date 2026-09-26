@@ -1,5 +1,6 @@
 #include <WiFi.h>
 #include <WebServer.h>
+#include <TinyGPSPlus.h>
 
 // --- Configuration ---
 
@@ -10,300 +11,205 @@ const char* password = "fecsforachange123";
 // GPIO pin connected to the relay module
 const int RELAY_PIN = 26;
 
+// GPS module UART pins (Neo-6M and similar modules)
+// GPS TX -> ESP32 GPIO16 (RX2)
+// GPS RX -> ESP32 GPIO17 (TX2)
+const int GPS_RX_PIN = 16;
+const int GPS_TX_PIN = 17;
+const uint32_t GPS_BAUD_RATE = 9600;
+
 // Mock database credentials for prototype testing
 const String validEPA = "EPA123";
 const String validID = "CS001";
 const String validCode = "7788";
 
-// Create a web server listening on port 80
 WebServer server(80);
+TinyGPSPlus gps;
+HardwareSerial gpsSerial(2);
 
+// GPS is considered active only after successful authentication.
+bool gpsActivated = false;
 
 // --- Login Page HTML & CSS ---
 
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FECS IDENTIFICATION</title>
-
     <style>
-        body {
-            font-family: Arial, sans-serif;
-            background-color: #f4f7f9;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            height: 100vh;
-            margin: 0;
-        }
-
-        h2 {
-            color: #007bff;
-            font-size: 24px;
-            letter-spacing: 0.5px;
-            margin-bottom: 20px;
-        }
-
-        .card {
-            background-color: white;
-            padding: 30px;
-            border-radius: 8px;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
-            width: 300px;
-        }
-
-        .form-group {
-            margin-bottom: 15px;
-        }
-
-        label {
-            display: block;
-            font-size: 12px;
-            font-weight: bold;
-            color: #333;
-            margin-bottom: 5px;
-        }
-
-        input[type="text"],
-        input[type="password"] {
-            width: 100%;
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            box-sizing: border-box;
-            font-size: 14px;
-        }
-
-        button {
-            width: 100%;
-            padding: 12px;
-            background-color: #007bff;
-            color: white;
-            border: none;
-            border-radius: 4px;
-            font-size: 14px;
-            font-weight: bold;
-            cursor: pointer;
-            margin-top: 10px;
-        }
-
-        button:hover {
-            background-color: #0056b3;
-        }
-
-        .footer {
-            margin-top: 30px;
-            font-size: 10px;
-            color: #aaa;
-        }
-
-        .error {
-            color: red;
-            font-size: 12px;
-            text-align: center;
-            margin-bottom: 10px;
-            display: none;
-        }
+        body { font-family: Arial, sans-serif; background:#f4f7f9; display:flex;
+               flex-direction:column; align-items:center; justify-content:center;
+               min-height:100vh; margin:0; }
+        h2 { color:#007bff; font-size:24px; margin-bottom:20px; }
+        .card { background:white; padding:30px; border-radius:8px;
+                box-shadow:0 4px 12px rgba(0,0,0,.05); width:300px; }
+        .form-group { margin-bottom:15px; }
+        label { display:block; font-size:12px; font-weight:bold; color:#333; margin-bottom:5px; }
+        input { width:100%; padding:10px; border:1px solid #ddd; border-radius:4px;
+                box-sizing:border-box; font-size:14px; }
+        button { width:100%; padding:12px; background:#007bff; color:white; border:0;
+                 border-radius:4px; font-size:14px; font-weight:bold; cursor:pointer; margin-top:10px; }
+        .footer { margin-top:30px; font-size:10px; color:#aaa; }
+        .error { color:red; font-size:12px; text-align:center; margin-bottom:10px; display:none; }
     </style>
 </head>
-
 <body>
-
     <h2>FECS IDENTIFICATION GHANA</h2>
-
     <div class="card">
-
-        <div class="error" id="errorMsg">
-            Invalid Credentials. Try Again.
-        </div>
-
+        <div class="error" id="errorMsg">Invalid Credentials. Try Again.</div>
         <form action="/login" method="POST">
-
-            <div class="form-group">
-                <label>EPA Number:</label>
-                <input
-                    type="text"
-                    name="epa"
-                    placeholder="Enter EPA Number"
-                    required
-                >
-            </div>
-
-            <div class="form-group">
-                <label>Chainsaw ID:</label>
-                <input
-                    type="text"
-                    name="id"
-                    placeholder="Enter Chainsaw ID"
-                    required
-                >
-            </div>
-
-            <div class="form-group">
-                <label>Security Code:</label>
-                <input
-                    type="password"
-                    name="code"
-                    placeholder="Enter Security Code"
-                    required
-                >
-            </div>
-
+            <div class="form-group"><label>EPA Number:</label>
+                <input type="text" name="epa" placeholder="Enter EPA Number" required></div>
+            <div class="form-group"><label>Chainsaw ID:</label>
+                <input type="text" name="id" placeholder="Enter Chainsaw ID" required></div>
+            <div class="form-group"><label>Security Code:</label>
+                <input type="password" name="code" placeholder="Enter Security Code" required></div>
             <button type="submit">Submit</button>
-
         </form>
     </div>
-
-    <div class="footer">
-        &copy; 2024 FECS IDENTIFICATION GHANA
-    </div>
-
+    <div class="footer">&copy; 2024 FECS IDENTIFICATION GHANA</div>
     <script>
-        // Show error message if login failed
-        const urlParams = new URLSearchParams(window.location.search);
-
-        if (urlParams.has("error")) {
+        if (new URLSearchParams(window.location.search).has("error"))
             document.getElementById("errorMsg").style.display = "block";
-        }
     </script>
-
 </body>
 </html>
 )rawliteral";
 
-
-// --- Success Page HTML ---
+// --- Authenticated GPS Page ---
 
 const char success_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html>
-
 <head>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
+    <title>FECS GPS Tracker</title>
     <style>
-        body {
-            font-family: Arial;
-            text-align: center;
-            padding-top: 50px;
-            background-color: #e8f5e9;
-        }
-
-        h1 {
-            color: #2e7d32;
-        }
+        body { font-family:Arial; text-align:center; padding:30px 15px; background:#e8f5e9; }
+        h1 { color:#2e7d32; }
+        .location { background:white; border-radius:8px; padding:20px; margin:20px auto;
+                    max-width:360px; box-shadow:0 2px 8px rgba(0,0,0,.12); }
+        #status { font-weight:bold; }
+        a { color:#1565c0; }
     </style>
 </head>
-
 <body>
-
     <h1>Authentication Successful!</h1>
-
-    <p>GPS Tracker Activated.</p>
-
-    <p>
-        Motor Unlocked. You may now operate the chainsaw.
-    </p>
-
+    <p>Motor unlocked and GPS tracker activated.</p>
+    <div class="location">
+        <p id="status">Waiting for GPS fix...</p>
+        <p>Latitude: <span id="lat">--</span></p>
+        <p>Longitude: <span id="lng">--</span></p>
+        <p>Satellites: <span id="satellites">--</span></p>
+        <p><a id="map" href="#" target="_blank" style="display:none">Open location in map</a></p>
+    </div>
+    <script>
+        async function updateGPS() {
+            try {
+                const data = await fetch('/gps').then(response => response.json());
+                document.getElementById('satellites').textContent = data.satellites;
+                if (data.valid) {
+                    document.getElementById('status').textContent = 'GPS fix acquired';
+                    document.getElementById('lat').textContent = data.latitude.toFixed(6);
+                    document.getElementById('lng').textContent = data.longitude.toFixed(6);
+                    const map = document.getElementById('map');
+                    map.href = 'https://maps.google.com/?q=' + data.latitude + ',' + data.longitude;
+                    map.style.display = 'inline';
+                } else {
+                    document.getElementById('status').textContent = 'Waiting for GPS fix...';
+                }
+            } catch (error) {
+                document.getElementById('status').textContent = 'GPS service unavailable';
+            }
+        }
+        updateGPS();
+        setInterval(updateGPS, 2000);
+    </script>
 </body>
 </html>
 )rawliteral";
 
-
-// --- Server Handlers ---
+// Read all available NMEA data from the GPS module.
+void readGPS() {
+    while (gpsSerial.available() > 0) {
+        gps.encode(gpsSerial.read());
+    }
+}
 
 void handleRoot() {
     server.send(200, "text/html", index_html);
 }
 
+void handleGPS() {
+    if (!gpsActivated) {
+        server.send(403, "application/json", "{\"error\":\"GPS is not activated\"}");
+        return;
+    }
+
+    String json = "{\"active\":true,\"valid\":";
+    json += gps.location.isValid() ? "true" : "false";
+    json += ",\"latitude\":";
+    json += gps.location.isValid() ? String(gps.location.lat(), 6) : "0";
+    json += ",\"longitude\":";
+    json += gps.location.isValid() ? String(gps.location.lng(), 6) : "0";
+    json += ",\"satellites\":";
+    json += gps.satellites.isValid() ? String(gps.satellites.value()) : "0";
+    json += ",\"age_ms\":";
+    json += gps.location.isValid() ? String(gps.location.age()) : "-1";
+    json += "}";
+
+    server.send(200, "application/json", json);
+}
 
 void handleLogin() {
-
-    // Check if all form data was sent
-    if (
-        server.hasArg("epa") &&
-        server.hasArg("id") &&
-        server.hasArg("code")
-    ) {
-
-        String inputEPA = server.arg("epa");
-        String inputID = server.arg("id");
-        String inputCode = server.arg("code");
-
-        // Verify credentials
-        if (
-            inputEPA == validEPA &&
-            inputID == validID &&
-            inputCode == validCode
-        ) {
-
-            Serial.println("Login Successful! Turning on motor and GPS...");
-
-            // Trigger the relay / motor driver
-            digitalWrite(RELAY_PIN, HIGH);
-
-            // Send success page
-            server.send(200, "text/html", success_html);
-
-        } else {
-
-            Serial.println("Login Failed.");
-
-            // Redirect back to login page with an error flag
-            server.sendHeader("Location", "/?error=1");
-            server.send(303);
-        }
-
-    } else {
-
+    if (!server.hasArg("epa") || !server.hasArg("id") || !server.hasArg("code")) {
         server.send(400, "text/plain", "Bad Request");
+        return;
+    }
+
+    if (server.arg("epa") == validEPA &&
+        server.arg("id") == validID &&
+        server.arg("code") == validCode) {
+
+        Serial.println("Login successful. Activating GPS and unlocking motor...");
+        gpsActivated = true;
+        digitalWrite(RELAY_PIN, HIGH);
+        server.send(200, "text/html", success_html);
+    } else {
+        Serial.println("Login failed.");
+        server.sendHeader("Location", "/?error=1");
+        server.send(303);
     }
 }
 
-
-// --- Setup ---
-
 void setup() {
-
     Serial.begin(115200);
 
-    // Configure relay pin
     pinMode(RELAY_PIN, OUTPUT);
-
-    // Ensure motor is OFF by default
     digitalWrite(RELAY_PIN, LOW);
 
-    // Set up ESP32 as an Access Point
+    // Start UART communication with the GPS module.
+    gpsSerial.begin(GPS_BAUD_RATE, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+
     Serial.println("Setting up Access Point...");
-
     WiFi.softAP(ssid, password);
-
-    // Get Access Point IP address
-    IPAddress IP = WiFi.softAPIP();
-
     Serial.print("AP IP address: ");
-    Serial.println(IP);
+    Serial.println(WiFi.softAPIP());
 
-    // Define server routes
     server.on("/", HTTP_GET, handleRoot);
     server.on("/login", HTTP_POST, handleLogin);
-
-    // Start web server
+    server.on("/gps", HTTP_GET, handleGPS);
     server.begin();
 
     Serial.println("Web server started.");
+    Serial.println("GPS wiring: GPS TX -> GPIO16, GPS RX -> GPIO17");
 }
 
-
-// --- Main Loop ---
-
 void loop() {
-
-    // Listen for incoming clients
+    // Keep parsing GPS data even while no user is logged in, so a fix is ready quickly.
+    readGPS();
     server.handleClient();
 }
